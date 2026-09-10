@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<lcprojit appname="paid" vir_hei="0" engine_type="3" use_oldsnapmode="0" cpu_arm64="1" opt_logofillfloatwnd_checked="0" opt_useoldnodeservice_checked="0" vername="0.0.1" custom_menu_name="我的菜单" opt_bootautorun_checked="0" vir_wid="0" opt_disableshowfloatwnd_checked="0" opt_openanrunscript_checked="0" opt_showscriptmainui_checked="1" cpu_x86="1" projname="paid" opt_notshowmainui_checked="0" opt_openorclosebyvol_checked="1" icon="" show_log_menu="1" vercode="1" show_exit_menu="1" use_oldfloatwnd="0" listen_port="0" opt_floatwnddock="1" lcprojversion="150" opt_delncnn_checked="0" plugin_path="" cpu_x86_64="1" opt_delonnx_checked="0" apiport="0" use_pluginmainui="0" is_acc_mode="0" show_pause_menu="1" pkgname="paid" opt_runinrootmode_checked="1" show_setting_menu="1" use_confusion="0" crashautorestart="0" opt_forceruninrootmode_checked="224" cpu_arm="1" show_custom_menu="1" use_simplelogwnd="0" use_pluginservice="0" opt_recorandsavelog_checked="1" opt_delnatural_checked="0" opt_remove_imgui="0">
+ <lua entry="paid.lua"/>
+ <ui entry="paid.ui"/>
+ <rc entry="paid.rc"/>
+ <luaej/>
+</lcprojit>
