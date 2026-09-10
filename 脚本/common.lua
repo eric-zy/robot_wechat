@@ -2442,114 +2442,162 @@ function C.forwardMiniApp(targetContact)
 	
 	sleep(1000)
 
-	-- 步骤6: 选择转发联系人
-	if targetContact and targetContact ~= "" then
-		local findRes = false
-		local n = 0
+	-- [安全修复] 手机号提取（下面两段找人共用）
+	local phonePattern = "1[3-9]%d%d%d%d%d%d%d%d%d"
+	local targetPhone = targetContact and string.match(targetContact, phonePattern) or nil
 
-		-- 手机号正则：1开头，11位数字
-		local phonePattern = "1[3-9]%d%d%d%d%d%d%d%d%d%d"
-		local searchPhone = targetContact
+	-- 昵称提取：从 targetContact 去掉手机号后剩余部分，再归一化（去空格标点）
+	local nickName = ""
+	if targetContact then
+		nickName = targetContact
+		if targetPhone then
+			nickName = string.gsub(nickName, targetPhone, "")
+		end
+		nickName = string.gsub(nickName, "[%s%p]", "")
+	end
 
-		-- 判断传入的是否是手机号
-		if not string.match(targetContact, "^" .. phonePattern .. "$") then
-			-- 不是标准手机号，尝试从中提取手机号
-			local extractedPhone = string.match(targetContact, phonePattern)
-			if extractedPhone then
-				print("从", targetContact, "中提取到手机号:", extractedPhone)
-				searchPhone = extractedPhone
-			else
-				print("无法从", targetContact, "中提取手机号，使用原始值搜索")
+	-- 安全取字符数：utf8.length 遇到非法 UTF-8 会返回 nil（OCR 噪声很常见），必须兜底
+	local function uLenSafe(s)
+		if not s or s == "" then return 0 end
+		local ok, n = pcall(utf8.length, s)
+		if ok and type(n) == "number" then return n end
+		local _, c = string.gsub(s, "[^\128-\191]", "")
+		return c
+	end
+
+	-- 构造命中结果：OCR 坐标解析失败时是 (0,0)，必须排除，否则机械臂点屏幕左上角
+	local function mkHit(b)
+		local x = math.floor(b.x or 0)
+		local y = math.floor(b.y or 0)
+		if x <= 0 or y <= 0 then return nil end
+		return {x = x, y = y, words = b.words}
+	end
+
+	-- 手机号 11 位全匹配：提取数字后全等才算命中（禁止包含与模糊匹配）
+	local function findPhoneBox(x1, y1, x2, y2, phone)
+		if not phone or phone == "" then return nil end
+		local boxes = ocr_start_with_boxes(x1, y1, x2, y2)
+		if not boxes then return nil end
+		for _, b in ipairs(boxes) do
+			local digits = string.gsub(b.words or "", "%D", "")
+			if #digits == 11 and digits == phone then
+				local hit = mkHit(b)
+				if hit then return hit end
 			end
 		end
+		return nil
+	end
 
-		-- 计算中间部分用于模糊匹配
-		local strLen = utf8.length(searchPhone)
-		local middleParts = {}
-		if strLen >= 5 then
-			table.insert(middleParts, utf8.mid(searchPhone, 2, 4))
+	-- 按字符差异数；OCR 乱码导致比对异常时返回 99（视为不匹配，不崩）
+	local function charDiff(a, b)
+		local ok, d = pcall(function()
+			local la, lb = uLenSafe(a), uLenSafe(b)
+			local n = math.min(la, lb)
+			local diff = math.abs(la - lb)
+			for i = 1, n do
+				if utf8.mid(a, i, 1) ~= utf8.mid(b, i, 1) then diff = diff + 1 end
+			end
+			return diff
+		end)
+		if ok and type(d) == "number" then return d end
+		return 99
+	end
+
+	-- 昵称模糊匹配：
+	--   1) 归一化后完全相等 → 立即命中
+	--   2) 否则要求长度相近（差 <=1）且字符差异 <=1（长昵称 <=2）→ 取差异最小的
+	--   不做纯包含匹配，避免 "张三" 命中 "张三丰" 这类误匹配
+	local function findNameBox(x1, y1, x2, y2, name)
+		if not name or name == "" then return nil end
+		local nameLen = uLenSafe(name)
+		if nameLen < 2 then return nil end
+		local boxes = ocr_start_with_boxes(x1, y1, x2, y2)
+		if not boxes then return nil end
+		local best, bestDiff = nil, 99
+		for _, b in ipairs(boxes) do
+			local w = string.gsub(b.words or "", "[%s%p]", "")
+			if w ~= "" then
+				if w == name then
+					local hit = mkHit(b)
+					if hit then return hit end
+				else
+					local wLen = uLenSafe(w)
+					if wLen >= 2 and math.abs(wLen - nameLen) <= 1 then
+						local d = charDiff(w, name)
+						local maxDiff = (nameLen >= 6) and 2 or 1
+						if d <= maxDiff and d < bestDiff then
+							local hit = mkHit(b)
+							if hit then
+								bestDiff = d
+								best = hit
+							end
+						end
+					end
+				end
+			end
 		end
-		if strLen >= 6 then
-			table.insert(middleParts, utf8.mid(searchPhone, 3, 6))
+		return best
+	end
+
+	-- 未匹配到目标时：取消转发面板并退出，绝不点发送（原来会发给残留选中项）
+	local function cancelForwardAndExit(reason)
+		print("取消转发：" .. reason)
+		local cancelPos = ocr_start(300, 1500, 950, 1900, "取消")
+		if not cancelPos then cancelPos = ocr_start(0, 0, 0, 0, "取消") end
+		if cancelPos then
+			randomTap(cancelPos[1], cancelPos[2], 5, 5, "取消转发")
+			sleep(800)
 		end
+		monitor.record("转发小程序失败（" .. reason .. "）：", os.time() - op_start)
+		return false
+	end
 
-		print("搜索号码:", searchPhone, "长度:", strLen, "模糊匹配候选:", table.concat(middleParts, ", "))
+	-- 步骤6: 选择转发联系人（先手机号全匹配 3 次，匹配不到再昵称匹配 3 次）
+	if not (targetContact and targetContact ~= "") then
+		return cancelForwardAndExit("未指定联系人")
+	end
+	if (not targetPhone or targetPhone == "") and nickName == "" then
+		return cancelForwardAndExit("目标中既无手机号也无昵称，无法匹配")
+	end
+	print("匹配目标 -> 手机号:", tostring(targetPhone), " 昵称:", nickName)
 
-		while findRes == false and n < 10  do
-			n = n + 1
-			print("第"..n.."次搜索并选择联系人:", searchPhone)
-			sleep(1000)
+	local findRes = false
+	local backoff = {800, 1600, 2400}
+	local hit = nil
 
-			-- 先尝试精确匹配（搜索手机号）
-			local contactRes = ocr_start(200, 300, 900, 1800, searchPhone)
-
-			if contactRes then
-				print("精确匹配找到联系人:", searchPhone, contactRes[1], contactRes[2])
-				randomTap(contactRes[1], contactRes[2], 10, 10, "选择联系人")
-				findRes = true
+	-- 阶段一：手机号 11 位全匹配，指数退避最多 3 次
+	if targetPhone then
+		for attempt = 1, 3 do
+			hit = findPhoneBox(200, 300, 900, 1800, targetPhone)
+			if hit then
+				print(string.format("第%d次OCR手机号全匹配命中:%s (%d,%d)", attempt, tostring(hit.words), hit.x, hit.y))
 				break
 			end
+			print(string.format("第%d次未匹配到手机号:%s", attempt, targetPhone))
+			if attempt < 3 then sleep(backoff[attempt]) end
+		end
+	end
 
-			-- 如果原始号码和提取的手机号不同，也尝试用原始号码精确匹配
-			if searchPhone ~= targetContact then
-				contactRes = ocr_start(200, 300, 900, 1800, targetContact)
-				if contactRes then
-					print("精确匹配找到联系人(原始):", targetContact, contactRes[1], contactRes[2])
-					randomTap(contactRes[1], contactRes[2], 10, 10, "选择联系人")
-					findRes = true
-					break
-				end
-			end
-
-			-- 精确匹配失败，尝试中间部分模糊匹配
-			for i, middlePart in ipairs(middleParts) do
-				print("尝试模糊匹配["..i.."]，中间部分:", middlePart)
-				contactRes = ocr_fuzzy_find(200, 300, 900, 1800, middlePart)
-				if contactRes then
-					print("模糊匹配找到联系人（中间部分）:", middlePart, contactRes[1], contactRes[2])
-					randomTap(math.floor(contactRes[1]), math.floor(contactRes[2]), 10, 10, "选择联系人")
-					findRes = true
-					break
-				end
-			end
-
-			-- 如果中间部分匹配都失败，尝试用原始昵称匹配
-			if not findRes then
-				print("尝试完整昵称模糊匹配:", targetContact)
-				contactRes = ocr_fuzzy_find(200, 300, 900, 1800, targetContact)
-				if contactRes then
-					print("完整昵称匹配找到联系人:", targetContact, contactRes[1], contactRes[2])
-					randomTap(math.floor(contactRes[1]), math.floor(contactRes[2]), 10, 10, "选择联系人")
-					findRes = true
-				end
-			end
-
-			-- 如果完整昵称也失败，尝试昵称前缀匹配
-			if not findRes then
-				local nicknamePart = utf8.mid(targetContact, 1, math.min(4, utf8.length(targetContact)))
-				print("尝试昵称前缀模糊匹配:", nicknamePart)
-				contactRes = ocr_fuzzy_find(200, 300, 900, 1800, nicknamePart)
-				if contactRes then
-					print("昵称前缀匹配找到联系人:", nicknamePart, contactRes[1], contactRes[2])
-					randomTap(math.floor(contactRes[1]), math.floor(contactRes[2]), 10, 10, "选择联系人")
-					findRes = true
-				end
-			end
-
-			if findRes then
+	-- 阶段二：手机号 3 次都匹配不到，再降级匹配昵称（全等优先，否则长度相近且字差 <=1）
+	if not hit and nickName ~= "" then
+		print("手机号3次均未命中，降级匹配昵称:", nickName)
+		for attempt = 1, 3 do
+			hit = findNameBox(200, 300, 900, 1800, nickName)
+			if hit then
+				print(string.format("第%d次昵称匹配命中:%s (%d,%d)", attempt, tostring(hit.words), hit.x, hit.y))
 				break
 			end
+			if attempt < 3 then sleep(backoff[attempt]) end
 		end
+	end
 
+	if hit then
+		randomTap(hit.x, hit.y, 10, 10, "选择联系人")
+		findRes = true
+	end
 
-		if not findRes then
-			print("未找到指定联系人:", targetContact, "，请手动选择")
-			sleep(2000)
-		end
-	else
-		-- 如果没有指定联系人，等待用户手动选择
-		print("未指定联系人，请手动选择转发对象")
-		sleep(2000)
+	if not findRes then
+		return cancelForwardAndExit("手机号与昵称均未匹配到联系人")
 	end
 	
 	-- 步骤7: 确认转发（点击发送按钮）
@@ -2567,44 +2615,31 @@ function C.forwardMiniApp(targetContact)
 		-- 回到聊天页
 		sleep(1000)
 	
-		-- 提取手机号用于模糊匹配
-		local targetPhone = string.match(targetContact, "%d+")
-		-- 使用手机号中间6位（第3-8位）进行模糊匹配
-		local phoneMiddle = targetPhone and #targetPhone >= 8 and string.sub(targetPhone, 3, 8) or nil
-		
-		local n = 0
-		local maxRetry = 10
+		-- 同样：先手机号全匹配 3 次，匹配不到再降级昵称匹配 3 次，找不到不盲点
 		local found = false
-		while n < maxRetry do
-			n = n + 1
-			sleep(1000)
-			
-			-- 先尝试精确匹配
-			local contactPos = ocr_start(206, 327, 858, 1763, targetContact)
-			print("第"..n.."次识别"..targetContact.."--进入详情")
-			
-			if contactPos then
-				randomTap(contactPos[1], contactPos[2], 100, 20, "点击"..targetContact.."位置")
-				found = true
-				break
-			end
-			
-			-- 精确匹配失败，尝试手机号中间6位模糊匹配
-			if phoneMiddle then
-				contactPos = ocr_start(206, 327, 858, 1763, phoneMiddle)
-				if contactPos then
-					print("第"..n.."次模糊匹配（手机号中间6位）："..phoneMiddle)
-					randomTap(contactPos[1], contactPos[2], 100, 20, "点击"..phoneMiddle.."位置")
-					found = true
-					break
-				end
+		local hit = nil
+		local backoff = {800, 1600, 2400}
+		if targetPhone then
+			for attempt = 1, 3 do
+				hit = findPhoneBox(206, 327, 858, 1763, targetPhone)
+				if hit then break end
+				if attempt < 3 then sleep(backoff[attempt]) end
 			end
 		end
-		
+		if not hit and nickName ~= "" then
+			for attempt = 1, 3 do
+				hit = findNameBox(206, 327, 858, 1763, nickName)
+				if hit then break end
+				if attempt < 3 then sleep(backoff[attempt]) end
+			end
+		end
+		if hit then
+			print(string.format("回列表命中:%s (%d,%d)", tostring(hit.words), hit.x, hit.y))
+			randomTap(hit.x, hit.y, 100, 20, "点击进入目标会话")
+			found = true
+		end
 		if not found then
-			print("未找到联系人："..targetContact.."，点击固定区域位置")
-			-- 点击固定区域 (107,327,740,456) 的中间位置
-			randomTap(423, 391, 50, 50, "点击固定区域位置")
+			print("未找到联系人："..targetContact.."，不做盲点，直接返回")
 		end
 		return true
 	else
